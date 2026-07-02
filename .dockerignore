@@ -1,0 +1,5 @@
+node_modules
+dist
+Review Project
+.git
+.env
