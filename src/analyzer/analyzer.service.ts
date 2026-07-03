@@ -2,6 +2,8 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import * as fs from 'fs';
 import * as path from 'path';
+import { AstAnalyzerService } from './ast-analyzer.service';
+import { DependencyGraphService } from './dependency-graph.service';
 
 // Folders we never want to walk into
 const IGNORE_DIRS = new Set([
@@ -38,7 +40,6 @@ interface DependencyFlags {
 
 @Injectable()
 export class AnalyzerService {
-  // Folder names we care about detecting (common project structure)
   private readonly WATCHED_FOLDERS = [
     'src',
     'app',
@@ -51,6 +52,10 @@ export class AnalyzerService {
     'api',
   ];
 
+   constructor(
+    private readonly astAnalyzer: AstAnalyzerService,  
+    private readonly dependencyGraph: DependencyGraphService,) {}
+
   async analyze(localPath: string) {
     if (!fs.existsSync(localPath)) {
       throw new NotFoundException(`Local repo path not found: ${localPath}`);
@@ -60,9 +65,9 @@ export class AnalyzerService {
     const deps = this.detectDependencies(packageJson);
     const scan = this.scanDirectory(localPath);
 
-    // top-level framework label, e.g. "next14", "react18", "unknown"
     const framework = this.buildFrameworkLabel(deps);
-
+    const ast = this.astAnalyzer.analyze(localPath);
+    const dependencyGraph = this.dependencyGraph.build(localPath);
     return {
       framework,
       typescript: deps.typescript,
@@ -71,7 +76,7 @@ export class AnalyzerService {
       folders: scan.folders,
       nextjs: deps.nextjs,
       react: deps.react,
-      structure: scan.detectedFolders, // e.g. ['src','app','components','hooks']
+      structure: scan.detectedFolders, 
       stateManagement: {
         redux: deps.redux,
         zustand: deps.zustand,
@@ -84,6 +89,8 @@ export class AnalyzerService {
       dataFetching: {
         reactQuery: deps.reactQuery,
       },
+      ast,
+      dependencyGraph,
     };
   }
 
@@ -135,7 +142,6 @@ export class AnalyzerService {
     return 'unknown';
   }
 
-  // ---------- filesystem traversal ----------
 
   private scanDirectory(rootPath: string): ScanResult {
     let files = 0;
