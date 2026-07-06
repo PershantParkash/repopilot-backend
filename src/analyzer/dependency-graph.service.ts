@@ -16,16 +16,24 @@ const IGNORE_GLOBS = [
 ];
 
 export interface DependencyEdge {
-  from: string; // relative file path, e.g. "src/components/Dashboard.tsx"
-  to: string; // relative file path, e.g. "src/components/UserCard.tsx"
+  from: string;
+  to: string;
   kind: 'import' | 're-export';
   isTypeOnly: boolean;
 }
 
 export interface DependencyGraph {
-  nodes: string[]; // every internal file in the project, as relative paths
-  edges: DependencyEdge[]; // internal file -> internal file dependency
-  externalDependencies: Record<string, string[]>; // relative path -> npm package names it imports
+  nodes: string[];
+  edges: DependencyEdge[];
+  externalDependencies: Record<string, string[]>;
+}
+
+export interface DependencyGraphSummary {
+  nodes: number;
+  edges: number;
+  circularDependencies: number;
+  maxDepth: number;
+  externalPackages: number;
 }
 
 @Injectable()
@@ -54,13 +62,28 @@ export class DependencyGraphService {
     return { nodes, edges, externalDependencies };
   }
 
+  /**
+   * Cheap, fixed-size stats derived from an already-built graph.
+   * This is what goes in the default analysis response; `build()`'s
+   * full output is only served from the dedicated /graph endpoint.
+   */
+  summarize(graph: DependencyGraph): DependencyGraphSummary {
+    const externalPackages = new Set<string>();
+    for (const pkgs of Object.values(graph.externalDependencies)) {
+      pkgs.forEach((p) => externalPackages.add(p));
+    }
+
+    return {
+      nodes: graph.nodes.length,
+      edges: graph.edges.length,
+      circularDependencies: this.countCircularDependencies(graph),
+      maxDepth: this.computeMaxDepth(graph),
+      externalPackages: externalPackages.size,
+    };
+  }
+
   // ---------- project setup ----------
 
-  /**
-   * Loading the real tsconfig.json (when the repo has one) is what lets
-   * ts-morph resolve path aliases like "@/components/Avatar" to a real
-   * file. Without it, only relative imports ("./Avatar") would resolve.
-   */
   private createProject(localPath: string): Project {
     const tsConfigPath = path.join(localPath, 'tsconfig.json');
 
@@ -101,8 +124,6 @@ export class DependencyGraphService {
       } else if (this.isExternalPackage(specifier)) {
         externalDependencies[fromId].push(specifier);
       }
-      // else: relative import that didn't resolve to a file we scanned
-      // (e.g. broken import, or path outside localPath) — skipped silently
     }
   }
 
@@ -114,7 +135,7 @@ export class DependencyGraphService {
     externalDependencies: Record<string, string[]>,
   ) {
     for (const exportDecl of sourceFile.getExportDeclarations()) {
-      if (!exportDecl.hasModuleSpecifier()) continue; // local `export { X }`, not a dependency
+      if (!exportDecl.hasModuleSpecifier()) continue;
 
       const resolved = exportDecl.getModuleSpecifierSourceFile();
       const specifier = exportDecl.getModuleSpecifierValue();
@@ -132,12 +153,111 @@ export class DependencyGraphService {
     }
   }
 
+  // ---------- graph analysis ----------
+
+  /**
+   * Tarjan's SCC algorithm — a strongly connected component with more
+   * than one node means those files import each other in a cycle.
+   * Recursive; fine for typical repos, but a very deep single import
+   * chain (thousands of files in one path) could hit the call stack —
+   * convert to an explicit stack if that ever becomes a problem.
+   */
+  private countCircularDependencies(graph: DependencyGraph): number {
+    const adjacency = new Map<string, string[]>();
+    graph.nodes.forEach((n) => adjacency.set(n, []));
+    graph.edges.forEach((e) => adjacency.get(e.from)?.push(e.to));
+
+    let index = 0;
+    const indices = new Map<string, number>();
+    const lowlink = new Map<string, number>();
+    const onStack = new Set<string>();
+    const stack: string[] = [];
+    let sccCount = 0;
+
+    const strongConnect = (v: string) => {
+      indices.set(v, index);
+      lowlink.set(v, index);
+      index++;
+      stack.push(v);
+      onStack.add(v);
+
+      for (const w of adjacency.get(v) ?? []) {
+        if (!indices.has(w)) {
+          strongConnect(w);
+          lowlink.set(v, Math.min(lowlink.get(v)!, lowlink.get(w)!));
+        } else if (onStack.has(w)) {
+          lowlink.set(v, Math.min(lowlink.get(v)!, indices.get(w)!));
+        }
+      }
+
+      if (lowlink.get(v) === indices.get(v)) {
+        const component: string[] = [];
+        let w: string;
+        do {
+          w = stack.pop()!;
+          onStack.delete(w);
+          component.push(w);
+        } while (w !== v);
+
+        if (component.length > 1) sccCount++;
+      }
+    };
+
+    for (const node of graph.nodes) {
+      if (!indices.has(node)) strongConnect(node);
+    }
+
+    return sccCount;
+  }
+
+  /**
+   * BFS depth (shortest distance) from every "entry" file — a node with
+   * no incoming internal edges — to the farthest file it reaches.
+   * BFS instead of longest-simple-path because the latter is NP-hard
+   * and the graph can contain cycles.
+   */
+  private computeMaxDepth(graph: DependencyGraph): number {
+    const adjacency = new Map<string, string[]>();
+    const hasIncoming = new Set<string>();
+    graph.nodes.forEach((n) => adjacency.set(n, []));
+    graph.edges.forEach((e) => {
+      adjacency.get(e.from)?.push(e.to);
+      hasIncoming.add(e.to);
+    });
+
+    const entryNodes = graph.nodes.filter((n) => !hasIncoming.has(n));
+    const roots = entryNodes.length > 0 ? entryNodes : graph.nodes.slice(0, 1);
+
+    let maxDepth = 0;
+    const globalVisited = new Set<string>();
+
+    for (const root of roots) {
+      if (globalVisited.has(root)) continue;
+
+      const queue: Array<{ node: string; depth: number }> = [{ node: root, depth: 0 }];
+      const visited = new Set<string>([root]);
+
+      while (queue.length) {
+        const { node, depth } = queue.shift()!;
+        maxDepth = Math.max(maxDepth, depth);
+        globalVisited.add(node);
+
+        for (const next of adjacency.get(node) ?? []) {
+          if (!visited.has(next)) {
+            visited.add(next);
+            queue.push({ node: next, depth: depth + 1 });
+          }
+        }
+      }
+    }
+
+    return maxDepth;
+  }
+
   // ---------- helpers ----------
 
   private isExternalPackage(specifier: string | undefined): boolean {
     if (!specifier) return false;
-    // relative ("./x", "../x") or absolute ("/x") paths are internal;
-    // everything else ("react", "@/lib/utils" pre-alias-resolution, "axios") is external
     return !specifier.startsWith('.') && !specifier.startsWith('/');
   }
 

@@ -6,6 +6,8 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { RepositoryEntity } from '../entities/repository.entity';
 import { AnalyzerService } from 'src/analyzer/analyzer.service';
+import { DependencyGraphService } from 'src/analyzer/dependency-graph.service';
+import { FullAnalysis } from 'src/analyzer/analyzer.service';
 
 const CLONE_BASE_DIR = path.join(process.cwd(), 'Review Project');
 
@@ -73,20 +75,48 @@ export class RepositoryService {
     }
   }
 
-   async analyzeRepository(id: string) {
-    const record = await this.repoRepository.findOneBy({ id });
-    if (!record) throw new NotFoundException('Repository record not found');
-    if (record.status !== 'completed') {
-      throw new BadRequestException(`Repository is not ready (status: ${record.status})`);
-    }
-
-    const analysis = await this.analyzerService.analyze(record.localPath);
-
-    record.analysis = analysis;
-    await this.repoRepository.save(record);
-
-    return analysis;
+ async analyzeRepository(id: string) {
+  const record = await this.repoRepository.findOneBy({ id });
+  if (!record) throw new NotFoundException('Repository record not found');
+  if (record.status !== 'completed') {
+    throw new BadRequestException(`Repository is not ready (status: ${record.status})`);
   }
+
+  // one crawl produces the full analysis; we persist it once...
+  const fullAnalysis = await this.analyzerService.analyze(record.localPath);
+  record.analysis = fullAnalysis;
+  await this.repoRepository.save(record);
+
+  // ...and only ever hand the lean summary back from this endpoint
+  return this.analyzerService.toSummary(fullAnalysis);
+}
+
+async getComponents(id: string) {
+  const record = await this.getAnalyzedRecord(id);
+  return this.analyzerService.getComponents(record.analysis);
+}
+
+async getHooks(id: string) {
+  const record = await this.getAnalyzedRecord(id);
+  return this.analyzerService.getHooks(record.analysis);
+}
+
+async getGraph(id: string) {
+  const record = await this.getAnalyzedRecord(id);
+  return this.analyzerService.getGraph(record.analysis);
+}
+
+private async getAnalyzedRecord(
+  id: string,
+): Promise<RepositoryEntity & { analysis: FullAnalysis }> {
+  const record = await this.repoRepository.findOneBy({ id });
+  if (!record) throw new NotFoundException('Repository record not found');
+  if (!record.analysis) {
+    throw new BadRequestException('Repository has not been analyzed yet');
+  }
+  // Safe: we just verified analysis is non-null above.
+  return record as RepositoryEntity & { analysis: FullAnalysis };
+}
 
 
   async findAll() {

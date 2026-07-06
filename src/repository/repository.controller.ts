@@ -17,6 +17,21 @@ export class RepositoryController {
     return this.repositoryService.analyzeRepository(id);
   }
 
+  @Get(':id/components')
+getComponents(@Param('id') id: string) {
+  return this.repositoryService.getComponents(id);
+}
+
+@Get(':id/hooks')
+getHooks(@Param('id') id: string) {
+  return this.repositoryService.getHooks(id);
+}
+
+@Get(':id/graph')
+getGraph(@Param('id') id: string) {
+  return this.repositoryService.getGraph(id);
+}
+
   @Get()
   async findAll() {
     return this.repositoryService.findAll();

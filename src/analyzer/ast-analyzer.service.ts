@@ -3,7 +3,6 @@ import { Injectable } from '@nestjs/common';
 import { Project, SourceFile, Node, CallExpression } from 'ts-morph';
 import * as path from 'path';
 
-// Glob patterns ts-morph understands directly (prefix with ! to exclude)
 const IGNORE_GLOBS = [
   '**/node_modules/**',
   '**/.next/**',
@@ -33,14 +32,28 @@ const BUILT_IN_HOOKS = new Set([
   'useInsertionEffect',
 ]);
 
+export interface ComponentInfo {
+  name: string;
+  file: string;
+}
+
+export interface HookUsage {
+  name: string;
+  count: number;
+}
+
 export interface AstAnalysis {
   components: {
     total: number;
-    names: string[];
+    items: ComponentInfo[]; // full detail — trimmed to {total} in the summary response
   };
   hooks: {
-    builtIn: Record<string, number>; // { useState: 12, useEffect: 5, ... }
-    custom: { total: number; names: string[] };
+    builtIn: Record<string, number>; // small/fixed-size, safe to always inline
+    custom: {
+      total: number; // total call sites
+      unique: number; // distinct hook names
+      items: HookUsage[]; // full detail — trimmed to {total, unique} in the summary
+    };
   };
   contexts: {
     total: number;
@@ -52,7 +65,7 @@ export interface AstAnalysis {
   apiCalls: {
     fetch: number;
     axios: number;
-    apiRoutes: string[]; // files matched as Next.js API routes
+    apiRoutes: string[];
   };
   useEffectCount: number;
 }
@@ -65,7 +78,7 @@ export class AstAnalyzerService {
       useInMemoryFileSystem: false,
       compilerOptions: {
         allowJs: true,
-        jsx: 4, // JsxEmit.ReactJSX — lets the parser understand .tsx/.jsx syntax
+        jsx: 4, // JsxEmit.ReactJSX
       },
     });
 
@@ -75,39 +88,50 @@ export class AstAnalyzerService {
     ]);
 
     const result: AstAnalysis = {
-      components: { total: 0, names: [] },
-      hooks: { builtIn: {}, custom: { total: 0, names: [] } },
+      components: { total: 0, items: [] },
+      hooks: { builtIn: {}, custom: { total: 0, unique: 0, items: [] } },
       contexts: { total: 0, names: [] },
       asyncFunctions: { total: 0 },
       apiCalls: { fetch: 0, axios: 0, apiRoutes: [] },
       useEffectCount: 0,
     };
 
+    // name -> call count, kept outside `result` until we finalize the sorted list
+    const customHookCounts = new Map<string, number>();
+
     for (const sourceFile of project.getSourceFiles()) {
-      this.analyzeFile(sourceFile, result);
+      const relativeFile = this.toRelativeId(localPath, sourceFile.getFilePath());
+      this.analyzeFile(sourceFile, relativeFile, result, customHookCounts);
     }
+
+    result.hooks.custom.unique = customHookCounts.size;
+    result.hooks.custom.items = Array.from(customHookCounts.entries())
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count); // most-used hooks first
 
     return result;
   }
 
   // ---------- per-file walk ----------
 
-  private analyzeFile(sourceFile: SourceFile, result: AstAnalysis) {
-    const filePath = sourceFile.getFilePath();
-
-    if (this.isApiRoute(filePath)) {
-      result.apiCalls.apiRoutes.push(filePath);
+  private analyzeFile(
+    sourceFile: SourceFile,
+    relativeFile: string,
+    result: AstAnalysis,
+    customHookCounts: Map<string, number>,
+  ) {
+    if (this.isApiRoute(sourceFile.getFilePath())) {
+      result.apiCalls.apiRoutes.push(relativeFile);
     }
 
     sourceFile.forEachDescendant((node) => {
       this.checkAsyncFunction(node, result);
-      this.checkCallExpression(node, result);
-      this.checkComponent(node, result);
+      this.checkCallExpression(node, result, customHookCounts);
+      this.checkComponent(node, relativeFile, result);
     });
   }
 
   private isApiRoute(filePath: string): boolean {
-    // pages/api/** (Pages Router) or app/**/route.ts (App Router)
     return (
       /[\\/]pages[\\/]api[\\/]/.test(filePath) ||
       /[\\/]app[\\/].*[\\/]route\.(ts|tsx|js|jsx)$/.test(filePath)
@@ -131,51 +155,42 @@ export class AstAnalyzerService {
 
   // ---------- hooks, contexts, fetch/axios ----------
 
-  private checkCallExpression(node: Node, result: AstAnalysis) {
+  private checkCallExpression(
+    node: Node,
+    result: AstAnalysis,
+    customHookCounts: Map<string, number>,
+  ) {
     if (!Node.isCallExpression(node)) return;
 
     const callName = this.getCallName(node);
     if (!callName) return;
 
-    // Built-in React hooks
     if (BUILT_IN_HOOKS.has(callName)) {
       result.hooks.builtIn[callName] = (result.hooks.builtIn[callName] || 0) + 1;
       if (callName === 'useEffect') result.useEffectCount++;
-      return; // a built-in hook call can't also be a custom hook or createContext
+      return;
     }
 
-    // Custom hooks: anything matching useXxx that isn't a built-in
     if (/^use[A-Z]/.test(callName)) {
       result.hooks.custom.total++;
-      if (!result.hooks.custom.names.includes(callName)) {
-        result.hooks.custom.names.push(callName);
-      }
+      customHookCounts.set(callName, (customHookCounts.get(callName) || 0) + 1);
     }
 
-    // React.createContext(...) or createContext(...)
     if (callName === 'createContext') {
       result.contexts.total++;
       const varName = this.getAssignedVariableName(node);
       if (varName) result.contexts.names.push(varName);
     }
 
-    // fetch(...)
     if (callName === 'fetch') {
       result.apiCalls.fetch++;
     }
 
-    // axios(...) or axios.get/post/put/delete/patch(...)
     if (/^axios(\.|$)/.test(callName)) {
       result.apiCalls.axios++;
     }
   }
 
-  /**
-   * Resolves what a CallExpression is actually calling:
-   *  - useState(...)          -> "useState"
-   *  - React.useState(...)    -> "useState"
-   *  - axios.get(...)         -> "axios.get"
-   */
   private getCallName(node: CallExpression): string | null {
     const expr = node.getExpression();
 
@@ -188,7 +203,6 @@ export class AstAnalyzerService {
       const objectText = expr.getExpression().getText();
 
       if (objectText === 'axios') return `axios.${propertyName}`;
-      // React.useState / React.useEffect etc. -> normalize to bare hook name
       return propertyName;
     }
 
@@ -205,18 +219,16 @@ export class AstAnalyzerService {
 
   // ---------- components ----------
 
-  private checkComponent(node: Node, result: AstAnalysis) {
-    // function Foo() { return <div/> }
+  private checkComponent(node: Node, relativeFile: string, result: AstAnalysis) {
     if (Node.isFunctionDeclaration(node)) {
       const name = node.getName();
       if (name && /^[A-Z]/.test(name) && this.containsJsx(node)) {
         result.components.total++;
-        result.components.names.push(name);
+        result.components.items.push({ name, file: relativeFile });
       }
       return;
     }
 
-    // const Foo = () => <div/>   OR   const Foo = function () { return <div/> }
     if (Node.isVariableDeclaration(node)) {
       const name = node.getName();
       const initializer = node.getInitializer();
@@ -228,7 +240,7 @@ export class AstAnalyzerService {
         this.containsJsx(initializer)
       ) {
         result.components.total++;
-        result.components.names.push(name);
+        result.components.items.push({ name, file: relativeFile });
       }
     }
   }
@@ -246,5 +258,11 @@ export class AstAnalyzerService {
       }
     });
     return found;
+  }
+
+  // ---------- helpers ----------
+
+  private toRelativeId(localPath: string, absolutePath: string): string {
+    return path.relative(localPath, absolutePath).split(path.sep).join('/');
   }
 }
