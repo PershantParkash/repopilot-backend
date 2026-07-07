@@ -8,6 +8,8 @@ import {
   DependencyGraph,
   DependencyGraphSummary,
 } from './dependency-graph.service';
+import { RulesEngineService } from './rules-engine.service';
+import { RuleResult } from './rules/rule.types';
 
 const IGNORE_DIRS = new Set([
   'node_modules', '.git', '.next', 'dist', 'build', '.turbo', '.vercel', 'coverage',
@@ -46,6 +48,7 @@ export interface FullAnalysis {
   ast: AstAnalysis;
   dependencyGraph: DependencyGraph;
   graphSummary: DependencyGraphSummary;
+  findings: RuleResult[];
 }
 
 /** Lean, fixed-size response — this is what the API returns by default. */
@@ -76,8 +79,9 @@ export class AnalyzerService {
   ];
 
   constructor(
-    private readonly astAnalyzer: AstAnalyzerService,
-    private readonly dependencyGraph: DependencyGraphService,
+     private readonly astAnalyzer: AstAnalyzerService,
+  private readonly dependencyGraph: DependencyGraphService,
+  private readonly rulesEngine: RulesEngineService,
   ) {}
 
   async analyze(localPath: string): Promise<FullAnalysis> {
@@ -88,11 +92,16 @@ export class AnalyzerService {
     const packageJson = this.readPackageJson(localPath);
     const deps = this.detectDependencies(packageJson);
     const scan = this.scanDirectory(localPath);
+
     const frameworkName = this.buildFrameworkLabel(deps);
 
     const ast = this.astAnalyzer.analyze(localPath);
     const graph = this.dependencyGraph.build(localPath);
     const graphSummary = this.dependencyGraph.summarize(graph);
+
+    const findings = this.rulesEngine.run(localPath, graph);
+
+    console.log("findings", findings)
 
     return {
       framework: {
@@ -109,6 +118,7 @@ export class AnalyzerService {
       ast,
       dependencyGraph: graph,
       graphSummary,
+      findings 
     };
   }
 
@@ -142,7 +152,11 @@ export class AnalyzerService {
     };
   }
 
-  // ---------- detail slices for the dedicated endpoints ----------
+getFindings(full: FullAnalysis): RuleResult[] {
+  const findings = full.findings ?? [];
+  const severityOrder = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
+  return [...findings].sort((a, b) => severityOrder[a.severity] - severityOrder[b.severity]);
+}
 
   getComponents(full: FullAnalysis): ComponentInfo[] {
     return full.ast.components.items;
@@ -156,6 +170,8 @@ export class AnalyzerService {
     return full.dependencyGraph;
   }
 
+
+  
   // ---------- package.json reading ----------
 
   private readPackageJson(localPath: string): any {

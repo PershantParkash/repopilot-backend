@@ -8,16 +8,19 @@ import { RepositoryEntity } from '../entities/repository.entity';
 import { AnalyzerService } from 'src/analyzer/analyzer.service';
 import { DependencyGraphService } from 'src/analyzer/dependency-graph.service';
 import { FullAnalysis } from 'src/analyzer/analyzer.service';
+import { FileDetailAnalyzerService } from 'src/analyzer/file-detail-analyzer.service';
+import { toCompactFileDetails } from 'src/analyzer/file-detail-serializer';
 
 const CLONE_BASE_DIR = path.join(process.cwd(), 'Review Project');
 
 @Injectable()
 export class RepositoryService {
-  constructor(
-    @InjectRepository(RepositoryEntity)
-    private readonly repoRepository: Repository<RepositoryEntity>,
-    private readonly analyzerService: AnalyzerService, 
-  ) {}
+ constructor(
+  @InjectRepository(RepositoryEntity)
+  private readonly repoRepository: Repository<RepositoryEntity>,
+  private readonly analyzerService: AnalyzerService,
+  private readonly fileDetailAnalyzer: FileDetailAnalyzerService,
+) {}
 
   private extractRepoName(url: string): string {
     const cleaned = url.replace(/\.git$/, '').replace(/\/$/, '');
@@ -74,6 +77,24 @@ export class RepositoryService {
       );
     }
   }
+
+async getFindings(id: string) {
+  const record = await this.getAnalyzedRecord(id);
+  const findings = record.analysis?.findings ?? [];
+  return this.fileDetailAnalyzer.analyzeAll(record.localPath, findings);
+}
+
+async getFindingsCompact(id: string) {
+  const details = await this.getFindings(id);
+  return toCompactFileDetails(details);
+}
+
+async getFindingsByKind(id: string) {
+  const record = await this.getAnalyzedRecord(id);
+  const findings = record.analysis?.findings ?? [];
+  const details = this.fileDetailAnalyzer.analyzeAll(record.localPath, findings);
+  return this.fileDetailAnalyzer.groupByKind(details);
+}
 
  async analyzeRepository(id: string) {
   const record = await this.repoRepository.findOneBy({ id });

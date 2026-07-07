@@ -17,6 +17,16 @@ export class RepositoryController {
     return this.repositoryService.analyzeRepository(id);
   }
 
+    @Get(':id/findings')
+getFindings(@Param('id') id: string) {
+  return this.repositoryService.getFindings(id);
+}
+
+@Get(':id/findings/compact')
+getFindingsCompact(@Param('id') id: string) {
+  return this.repositoryService.getFindingsCompact(id);
+}
+
   @Get(':id/components')
 getComponents(@Param('id') id: string) {
   return this.repositoryService.getComponents(id);
@@ -32,8 +42,14 @@ getGraph(@Param('id') id: string) {
   return this.repositoryService.getGraph(id);
 }
 
+@Get(':id/findings/by-kind')
+getFindingsByKind(@Param('id') id: string) {
+  return this.repositoryService.getFindingsByKind(id);
+}
+
   @Get()
   async findAll() {
     return this.repositoryService.findAll();
   }
+
 }
