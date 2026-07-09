@@ -18,6 +18,34 @@ export type BrowserApi =
 
 export type MemoizationFlag = 'reactMemo' | 'useMemo' | 'useCallback';
 
+export type RiskLevel = 'Low' | 'Medium' | 'High' | 'Critical';
+
+export interface CompactFileDetail {
+  file: string;
+  framework?: FrameworkKind;
+  kind: FileKind;
+  runtime?: { component: 'client' | 'server'; reason: string };
+  summary: {
+    lines: number;
+    imports: number;
+    exports: number;
+    cyclomaticComplexity: number;
+    jsxDepth?: number;
+  };
+  riskScore: number;
+  riskLevel: RiskLevel;
+  react?: CompactReact;
+  next?: CompactNext;
+  browser?: BrowserApi[];
+  network?: CompactNetworkCall[];
+  architecture: {
+    imports?: Partial<Record<'components' | 'hooks' | 'services' | 'utils' | 'store', number>>;
+    dependencyCount: number;
+    exports: string[];
+  };
+  findings: RuleResult[];
+}
+
 export interface CompactNetworkCall {
   library: 'fetch' | 'axios';
   method?: string; // omitted when 'GET' (the default)
@@ -86,26 +114,27 @@ export interface CompactNext {
   specialFiles?: { loading?: true; error?: true };
 }
 
-export interface CompactFileDetail {
-  file: string;
-  framework?: FrameworkKind; // omitted when 'react' (the project default)
-  kind: FileKind;
-  runtime?: { component: 'client' | 'server'; reason: string };
-  summary: {
-    lines: number;
-    imports: number;
-    exports: number;
-    cyclomaticComplexity: number;
-    jsxDepth?: number; // omitted when 0
-  };
-  react?: CompactReact; // omitted entirely when the file has no React signal
-  next?: CompactNext;
-  browser?: BrowserApi[]; // omitted when no browser API usage detected
-  network?: CompactNetworkCall[]; // flattened; omitted when no requests
-  architecture: {
-    imports?: Partial<Record<'components' | 'hooks' | 'services' | 'utils' | 'store', number>>;
-    dependencyCount: number;
-    exports: string[];
-  };
-  findings: RuleResult[]; // never trimmed — highest-value part per the review
-}
+// export interface CompactFileDetail {
+//   file: string;
+//   framework?: FrameworkKind; // omitted when 'react' (the project default)
+//   kind: FileKind;
+//   runtime?: { component: 'client' | 'server'; reason: string };
+//   summary: {
+//     lines: number;
+//     imports: number;
+//     exports: number;
+//     cyclomaticComplexity: number;
+//     jsxDepth?: number; // omitted when 0
+//   };
+//   react?: CompactReact; // omitted entirely when the file has no React signal
+//   next?: CompactNext;
+//   browser?: BrowserApi[]; // omitted when no browser API usage detected
+//   network?: CompactNetworkCall[]; // flattened; omitted when no requests
+//   architecture: {
+//     imports?: Partial<Record<'components' | 'hooks' | 'services' | 'utils' | 'store', number>>;
+//     dependencyCount: number;
+//     exports: string[];
+//   };
+//   findings: RuleResult[]; // never trimmed — highest-value part per the review
+// }
+

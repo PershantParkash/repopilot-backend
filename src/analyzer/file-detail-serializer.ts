@@ -1,19 +1,3 @@
-// analyzer/file-detail-serializer.ts
-//
-// Converts the full, internally-computed FileDetail into the lean shape an
-// AI code reviewer actually needs. General rule applied throughout:
-//
-//   Do not serialize default values.
-//   - drop false, 0, null, "", [], {}
-//   - collapse boolean-flag objects (browser, memoization) into arrays of
-//     the flags that are actually true
-//   - drop the `react` block entirely for files with no React signal
-//     (no hooks, no state, no effects, no JSX render patterns)
-//
-// This does NOT change FileDetailAnalyzerService or its output — it's a
-// pure transform you call at the point you're about to hand data to the AI
-// reviewer (e.g. in getFindings(), or a new getFindingsCompact()).
-
 import {
   FileDetail,
   StateVar,
@@ -31,9 +15,12 @@ import {
   CompactNext,
   BrowserApi,
   MemoizationFlag,
+  RiskLevel,
 } from './file-detail-compact.types';
 
 export function toCompactFileDetail(detail: FileDetail): CompactFileDetail {
+  const { score, level } = computeRiskScore(detail);
+
   const compact: CompactFileDetail = {
     file: detail.file,
     kind: detail.kind,
@@ -44,6 +31,8 @@ export function toCompactFileDetail(detail: FileDetail): CompactFileDetail {
       cyclomaticComplexity: detail.summary.cyclomaticComplexity,
       ...(detail.summary.jsxDepth ? { jsxDepth: detail.summary.jsxDepth } : {}),
     },
+    riskScore: score,
+    riskLevel: level,
     architecture: {
       ...(hasAny(detail.architecture.imports)
         ? { imports: pruneZeroCounts(detail.architecture.imports) }
@@ -54,7 +43,6 @@ export function toCompactFileDetail(detail: FileDetail): CompactFileDetail {
     findings: detail.findings,
   };
 
-  // framework: only worth stating when it deviates from the project default ('react')
   if (detail.framework === 'next') {
     compact.framework = detail.framework;
   }
@@ -82,10 +70,53 @@ export function toCompactFileDetail(detail: FileDetail): CompactFileDetail {
 }
 
 export function toCompactFileDetails(details: FileDetail[]): CompactFileDetail[] {
-  return details.map(toCompactFileDetail);
+  return details
+    .map(toCompactFileDetail)
+    .filter((d) => d.findings.length > 0);
 }
 
-// ---------- react ----------
+const SEVERITY_WEIGHTS: Record<string, number> = {
+  critical: 20,
+  high: 10,
+  medium: 5,
+  low: 2,
+  info: 0,
+};
+
+function complexityPenalty(complexity: number): number {
+  if (complexity >= 21) return 20;
+  if (complexity >= 16) return 10;
+  if (complexity >= 11) return 5;
+  return 0;
+}
+
+function fileSizePenalty(lines: number): number {
+  if (lines >= 401) return 10;
+  if (lines >= 201) return 5;
+  if (lines >= 101) return 2;
+  return 0;
+}
+
+function riskLevelFor(score: number): RiskLevel {
+  if (score >= 70) return 'Critical';
+  if (score >= 40) return 'High';
+  if (score >= 20) return 'Medium';
+  return 'Low';
+}
+
+function computeRiskScore(detail: FileDetail): { score: number; level: RiskLevel } {
+  const severityScore = detail.findings.reduce(
+    (sum, f) => sum + (SEVERITY_WEIGHTS[f.severity] ?? 0),
+    0,
+  );
+
+  const score =
+    severityScore +
+    complexityPenalty(detail.summary.cyclomaticComplexity) +
+    fileSizePenalty(detail.summary.lines);
+
+  return { score, level: riskLevelFor(score) };
+}
 
 function compactReact(detail: FileDetail): CompactReact | undefined {
   const r = detail.react;
